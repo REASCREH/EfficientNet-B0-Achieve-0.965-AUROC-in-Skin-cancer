@@ -135,6 +135,7 @@ $$\text{Input (1280)} \rightarrow \text{Dropout}(0.3) \rightarrow \text{Linear}(
 | F1 Score | 0.8778 | 0.8920 |
 
 The best model checkpoint was saved at **Epoch 24** with a validation AUROC of **0.9631**.
+![Alt text for the image](efficientnet_training_history_fold0_seed42.png)
 
 ---
 
@@ -179,6 +180,7 @@ weighted avg     0.9021    0.9019    0.9018      2660
 | **Skin Cancer Dataset** | 660 | 0.9501 | 0.8667 |
 
 The model demonstrates **consistent and high performance** across both source datasets, indicating good generalization.
+![Alt text for the image](test_metrics_barplot_fold0_seed42.png)
 
 ---
 
