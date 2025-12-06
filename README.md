@@ -229,3 +229,34 @@ The EfficientNet-B0 model demonstrates exceptional performance in skin cancer cl
 The model's balanced performance (**88.54% recall, 91.76% specificity**) makes it a promising tool for assisting dermatologists in early skin cancer detection, potentially reducing unnecessary biopsies while maintaining high sensitivity for malignant cases.
 
 This implementation provides a solid foundation for further development and clinical integration of AI-assisted dermatological diagnosis systems.
+
+# Skin Cancer Classification using EfficientNet-B0: Complete Project Report
+
+This project implements a deep learning solution for classifying skin lesions as **Malignant** or **Benign** using **EfficientNet-B0**. The system combines two medical image datasets and achieves state-of-the-art performance with **96.59% AUROC** and **90.19% accuracy** on a combined test set of 2,660 images.
+
+---
+
+## 🔗 Related Resources
+
+* **Training Notebook**: [Kaggle Notebook](https://www.kaggle.com/code/qamarmath/efficientnet-b0-achieve-0-965-auroc-in-skincancer/notebook?scriptVersionId=284255451)
+* **GitHub Repository**: [https://github.com/REASCREH/EfficientNet-B0-Achieve-0.965-AUROC-in-Skin-cancer](https://github.com/REASCREH/EfficientNet-B0-Achieve-0.965-AUROC-in-Skin-cancer)
+* **Dataset Used**: Combined Skin Cancer and Melanoma datasets
+
+---
+
+## 🚀 Quick Start
+
+To run the project locally and interact with the Streamlit demonstration app:
+
+### Option 1: Local Installation
+
+```bash
+# Clone the repository
+git clone [https://github.com/REASCREH/EfficientNet-B0-Achieve-0.965-AUROC-in-Skin-cancer.git](https://github.com/REASCREH/EfficientNet-B0-Achieve-0.965-AUROC-in-Skin-cancer.git)
+cd EfficientNet-B0-Achieve-0.965-AUROC-in-Skin-cancer
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the Streamlit app
+streamlit run mainapp.py
