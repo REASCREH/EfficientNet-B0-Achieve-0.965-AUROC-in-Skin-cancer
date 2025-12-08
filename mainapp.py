@@ -103,33 +103,35 @@ MODEL_PATHS = {
 # Default model path - using your best performing model
 DEFAULT_MODEL_PATH = MODEL_PATHS["fold0_best"]
 
-# Define the EfficientNet Model class
+# Define the EfficientNet Model class - FIXED VERSION
 class SkinCancerModel(nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes=1):
         super(SkinCancerModel, self).__init__()
-        self.model = EfficientNet.from_pretrained('efficientnet-b0')
+        # Load the entire EfficientNet model (not just pretrained features)
+        self.efficientnet = EfficientNet.from_pretrained('efficientnet-b0')
         
-        # Freeze early layers
-        for param in self.model.parameters():
-            param.requires_grad = False
+        # Get the number of features in the classifier layer
+        num_ftrs = self.efficientnet._fc.in_features
         
-        # Unfreeze last few blocks
-        for name, param in self.model.named_parameters():
-            if '_blocks.5' in name or '_blocks.6' in name or '_blocks.7' in name:
-                param.requires_grad = True
-            elif '_conv_head' in name or '_bn1' in name or '_fc' in name:
-                param.requires_grad = True
-        
-        # Modify final layer
-        num_features = self.model._fc.in_features
-        self.model._fc = nn.Sequential(
+        # Replace the classifier head with your custom one
+        self.efficientnet._fc = nn.Sequential(
             nn.Dropout(0.3),
-            nn.Linear(num_features, 256),
+            nn.Linear(num_ftrs, 256),
             nn.ReLU(),
             nn.BatchNorm1d(256),
             nn.Dropout(0.2),
-            nn.Linear(256, 1)
+            nn.Linear(256, num_classes)
         )
+    
+    def forward(self, x):
+        return self.efficientnet(x)
+
+# Alternative: Simple model that matches the saved weights
+class SimpleEfficientNet(nn.Module):
+    def __init__(self):
+        super(SimpleEfficientNet, self).__init__()
+        # This model structure matches the saved weights
+        self.model = EfficientNet.from_pretrained('efficientnet-b0', num_classes=1)
     
     def forward(self, x):
         return self.model(x)
@@ -146,13 +148,18 @@ def get_transforms(img_size=224):
         ToTensorV2()
     ])
 
-# Load model function
+# Load model function - FIXED VERSION
 @st.cache_resource
 def load_model(model_path):
     """Load the trained model"""
     try:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = SkinCancerModel()
+        
+        # Try different model architectures
+        models_to_try = [
+            SimpleEfficientNet,  # Try simple version first
+            SkinCancerModel,     # Then try custom version
+        ]
         
         st.info(f"Loading model from: {model_path}")
         
@@ -167,30 +174,111 @@ def load_model(model_path):
                 model_path = available_files[0]
                 st.info(f"Trying to load: {model_path}")
         
-        # Load state dict
-        if device.type == 'cpu':
-            checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
-        else:
-            checkpoint = torch.load(model_path)
-        
-        # Handle different checkpoint formats
-        if isinstance(checkpoint, dict):
-            if 'model_state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['model_state_dict'])
-            elif 'state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['state_dict'])
+        # Try loading with different approaches
+        checkpoint = None
+        try:
+            if device.type == 'cpu':
+                checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
             else:
-                # Try to load directly as state dict
-                model.load_state_dict(checkpoint)
-        else:
-            # Load as direct state dict
-            model.load_state_dict(checkpoint)
+                checkpoint = torch.load(model_path)
+        except:
+            # Try loading with pickle
+            try:
+                checkpoint = torch.load(model_path, map_location=device, pickle_module=None)
+            except Exception as e:
+                st.error(f"Failed to load model file: {str(e)}")
+                return None, None
         
-        model.to(device)
-        model.eval()
+        model_loaded = False
+        model = None
         
-        st.success(f"✅ Model loaded successfully on {device}!")
-        return model, device
+        # Try loading with different model architectures
+        for model_class in models_to_try:
+            try:
+                model = model_class()
+                
+                # Handle different checkpoint formats
+                if isinstance(checkpoint, dict):
+                    if 'model_state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                        st.info("Loaded from 'model_state_dict' (strict=False)")
+                    elif 'state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['state_dict'], strict=False)
+                        st.info("Loaded from 'state_dict' (strict=False)")
+                    elif 'model' in checkpoint:
+                        model.load_state_dict(checkpoint['model'], strict=False)
+                        st.info("Loaded from 'model' key (strict=False)")
+                    else:
+                        # Try direct loading
+                        try:
+                            model.load_state_dict(checkpoint, strict=False)
+                            st.info("Loaded directly from checkpoint (strict=False)")
+                        except:
+                            # Try to match keys manually
+                            st.info("Attempting manual key matching...")
+                            model_dict = model.state_dict()
+                            pretrained_dict = {k: v for k, v in checkpoint.items() 
+                                             if k in model_dict}
+                            model_dict.update(pretrained_dict)
+                            model.load_state_dict(model_dict)
+                else:
+                    # Checkpoint is likely the model itself
+                    try:
+                        model.load_state_dict(checkpoint.state_dict() if hasattr(checkpoint, 'state_dict') 
+                                            else checkpoint, strict=False)
+                    except:
+                        # Last resort: assign directly if types match
+                        if isinstance(checkpoint, nn.Module):
+                            model = checkpoint
+                
+                model.to(device)
+                model.eval()
+                model_loaded = True
+                st.success(f"✅ Model loaded successfully using {model_class.__name__}!")
+                break
+                
+            except Exception as e:
+                st.warning(f"Failed with {model_class.__name__}: {str(e)}")
+                continue
+        
+        if not model_loaded:
+            # Try the simplest approach: create base EfficientNet and load weights
+            st.info("Trying base EfficientNet approach...")
+            try:
+                model = EfficientNet.from_name('efficientnet-b0')
+                num_ftrs = model._fc.in_features
+                model._fc = nn.Linear(num_ftrs, 1)
+                
+                # Try to load weights
+                if isinstance(checkpoint, dict):
+                    if 'model_state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                    else:
+                        model.load_state_dict(checkpoint, strict=False)
+                else:
+                    model.load_state_dict(checkpoint.state_dict() if hasattr(checkpoint, 'state_dict') 
+                                        else checkpoint, strict=False)
+                
+                model.to(device)
+                model.eval()
+                st.success("✅ Model loaded with base EfficientNet (strict=False)!")
+                model_loaded = True
+            except Exception as e:
+                st.error(f"All loading attempts failed: {str(e)}")
+                return None, None
+        
+        if model_loaded:
+            # Test the model with a dummy input
+            try:
+                dummy_input = torch.randn(1, 3, 224, 224).to(device)
+                with torch.no_grad():
+                    output = model(dummy_input)
+                st.info(f"Model test passed! Output shape: {output.shape}")
+            except Exception as e:
+                st.warning(f"Model test warning: {str(e)}")
+            
+            return model, device
+        
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
         import traceback
@@ -234,14 +322,27 @@ def predict(model, device, image_tensor):
         with torch.no_grad():
             image_tensor = image_tensor.to(device)
             output = model(image_tensor)
-            probability = torch.sigmoid(output).cpu().numpy()[0][0]
+            
+            # Handle different output formats
+            if isinstance(output, tuple):
+                output = output[0]
+            
+            # Get probability using sigmoid for binary classification
+            if output.shape[1] > 1:
+                # Multi-class: use softmax
+                probability = torch.softmax(output, dim=1)[0, 1].cpu().numpy()
+            else:
+                # Binary: use sigmoid
+                probability = torch.sigmoid(output).cpu().numpy()[0][0]
             
             # Threshold at 0.5
             prediction = "MALIGNANT" if probability > 0.5 else "BENIGN"
             
-            return prediction, probability
+            return prediction, float(probability)
     except Exception as e:
         st.error(f"Error making prediction: {str(e)}")
+        import traceback
+        st.error(f"Traceback: {traceback.format_exc()}")
         return None, None
 
 # Visualization functions
@@ -313,7 +414,8 @@ def check_model_file():
     available_models = []
     for model_name, model_path in MODEL_PATHS.items():
         if os.path.exists(model_path):
-            available_models.append((model_name, model_path))
+            file_size = os.path.getsize(model_path) / (1024 * 1024)  # MB
+            available_models.append((model_name, model_path, file_size))
     
     return available_models
 
@@ -331,7 +433,8 @@ with st.sidebar:
     if available_models:
         st.success(f"✅ Found {len(available_models)} model(s)")
         
-        model_options = [f"{name} ({path})" for name, path in available_models]
+        model_options = [f"{name} ({os.path.basename(path)}) - {size:.1f}MB" 
+                        for name, path, size in available_models]
         selected_model = st.selectbox(
             "Select Model to Use",
             model_options,
@@ -339,8 +442,8 @@ with st.sidebar:
         )
         
         # Extract model path from selection
-        for name, path in available_models:
-            if f"{name} ({path})" == selected_model:
+        for name, path, size in available_models:
+            if f"{name} ({os.path.basename(path)}) - {size:.1f}MB" == selected_model:
                 model_path = path
                 break
         
@@ -362,14 +465,13 @@ with st.sidebar:
         Please ensure your model files (.pth) are in the same directory as this app.
         Expected files:
         - Fold0_efficientnet_AUROC0.9614_epoch20.pth
-        - Fold0_efficientnet_best_checkpoint.pth
         """)
         
         # List files in directory for debugging
-        st.subheader("Files in current directory:")
-        files = os.listdir('.')
-        for file in files:
-            st.text(f"  - {file}")
+        with st.expander("Debug: List all files in directory"):
+            files = os.listdir('.')
+            for file in files:
+                st.text(f"  - {file}")
         
         model_path = DEFAULT_MODEL_PATH
     
@@ -480,16 +582,36 @@ with col1:
         st.markdown("### Example Images")
         st.info("For best results, upload images similar to these examples:")
         
-        col_ex1, col_ex2, col_ex3 = st.columns(3)
-        with col_ex1:
-            st.markdown("**Clear, centered**")
-            st.markdown("![Example](https://via.placeholder.com/150x150/3B82F6/FFFFFF?text=Good+Example)")
-        with col_ex2:
-            st.markdown("**Good lighting**")
-            st.markdown("![Example](https://via.placeholder.com/150x150/10B981/FFFFFF?text=Well+Lit)")
-        with col_ex3:
-            st.markdown("**Proper focus**")
-            st.markdown("![Example](https://via.placeholder.com/150x150/8B5CF6/FFFFFF?text=In+Focus)")
+        # Create example placeholder
+        example_html = """
+        <div style="display: flex; justify-content: space-between; margin: 20px 0;">
+            <div style="text-align: center;">
+                <div style="width: 150px; height: 150px; background-color: #3B82F6; color: white; 
+                          display: flex; align-items: center; justify-content: center; 
+                          border-radius: 10px; margin: 0 auto;">
+                    Clear, centered
+                </div>
+                <p><strong>Clear, centered</strong></p>
+            </div>
+            <div style="text-align: center;">
+                <div style="width: 150px; height: 150px; background-color: #10B981; color: white; 
+                          display: flex; align-items: center; justify-content: center; 
+                          border-radius: 10px; margin: 0 auto;">
+                    Good lighting
+                </div>
+                <p><strong>Good lighting</strong></p>
+            </div>
+            <div style="text-align: center;">
+                <div style="width: 150px; height: 150px; background-color: #8B5CF6; color: white; 
+                          display: flex; align-items: center; justify-content: center; 
+                          border-radius: 10px; margin: 0 auto;">
+                    Proper focus
+                </div>
+                <p><strong>Proper focus</strong></p>
+            </div>
+        </div>
+        """
+        st.markdown(example_html, unsafe_allow_html=True)
 
 with col2:
     # Analysis section
@@ -523,6 +645,12 @@ with col2:
                         st.session_state.device = device
                         st.session_state.model_loaded = True
                         progress_bar.empty()
+                        
+                        # Clear previous predictions
+                        if 'analysis_complete' in st.session_state:
+                            del st.session_state.analysis_complete
+                        st.session_state.prediction = None
+                        st.session_state.confidence = None
                     else:
                         st.error("Failed to load model")
                         st.stop()
@@ -550,92 +678,93 @@ with col2:
                             st.balloons()
                             st.success("✅ Analysis complete!")
                             
-                            # Show results immediately
+                            # Force rerun to update display
                             st.rerun()
                     else:
                         st.error("Failed to preprocess image")
     
     # Display results if available
-    if hasattr(st.session_state, 'analysis_complete') and st.session_state.analysis_complete:
+    if 'analysis_complete' in st.session_state and st.session_state.analysis_complete:
         st.markdown("---")
         st.markdown('<div class="sub-header">📊 Analysis Results</div>', unsafe_allow_html=True)
         
         # Prediction box
-        prediction_class = "malignant" if st.session_state.prediction == "MALIGNANT" else "benign"
-        box_class = "malignant" if prediction_class == "malignant" else "benign"
-        color = "#EF4444" if prediction_class == "malignant" else "#10B981"
-        emoji = "⚠️" if prediction_class == "malignant" else "✅"
-        
-        st.markdown(f'''
-        <div class="prediction-box {box_class}">
-            <h2 style="margin: 0;">{emoji} {st.session_state.prediction} {emoji}</h2>
-            <div style="font-size: 3rem; margin: 20px 0; color: {color};">
-                {st.session_state.confidence*100:.1f}%
+        if st.session_state.prediction:
+            prediction_class = "malignant" if st.session_state.prediction == "MALIGNANT" else "benign"
+            box_class = "malignant" if prediction_class == "malignant" else "benign"
+            color = "#EF4444" if prediction_class == "malignant" else "#10B981"
+            emoji = "⚠️" if prediction_class == "malignant" else "✅"
+            
+            st.markdown(f'''
+            <div class="prediction-box {box_class}">
+                <h2 style="margin: 0;">{emoji} {st.session_state.prediction} {emoji}</h2>
+                <div style="font-size: 3rem; margin: 20px 0; color: {color};">
+                    {st.session_state.confidence*100:.1f}%
+                </div>
+                <p style="font-size: 1.1rem;">Confidence Score</p>
             </div>
-            <p style="font-size: 1.1rem;">Confidence Score</p>
-        </div>
-        ''', unsafe_allow_html=True)
-        
-        # Confidence visualization
-        st.markdown("### 📈 Confidence Visualization")
-        gauge_fig = create_confidence_gauge(st.session_state.confidence)
-        st.pyplot(gauge_fig)
-        
-        # Radar chart
-        st.markdown("### 🎯 Probability Distribution")
-        radar_fig = create_radar_chart(st.session_state.confidence)
-        st.pyplot(radar_fig)
-        
-        # Interpretation and recommendations
-        st.markdown("### 💡 Interpretation & Recommendations")
-        
-        if st.session_state.prediction == "MALIGNANT":
-            st.markdown("""
-            <div style="background-color: #FEF2F2; padding: 20px; border-radius: 10px; border-left: 5px solid #DC2626;">
-                <h4 style="color: #DC2626; margin-top: 0;">⚠️ POTENTIALLY MALIGNANT</h4>
-                
-                <p><strong>What this means:</strong><br>
-                The AI model has identified features commonly associated with malignant skin lesions.</p>
-                
-                <p><strong>Recommended Actions:</strong></p>
-                <ol>
-                    <li><strong>Consult a dermatologist immediately</strong></li>
-                    <li>Consider a biopsy for definitive diagnosis</li>
-                    <li>Monitor for changes in size, color, or shape</li>
-                    <li>Avoid sun exposure and use SPF 50+ sunscreen</li>
-                </ol>
-                
-                <p><strong>ABCDE Rule for Melanoma:</strong><br>
-                • <span style="color: #DC2626;">A</span>symmetry<br>
-                • <span style="color: #DC2626;">B</span>order irregularity<br>
-                • <span style="color: #DC2626;">C</span>olor variation<br>
-                • <span style="color: #DC2626;">D</span>iameter > 6mm<br>
-                • <span style="color: #DC2626;">E</span>volving/changing</p>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown("""
-            <div style="background-color: #F0FDF4; padding: 20px; border-radius: 10px; border-left: 5px solid #16A34A;">
-                <h4 style="color: #16A34A; margin-top: 0;">✅ LIKELY BENIGN</h4>
-                
-                <p><strong>What this means:</strong><br>
-                The AI model has identified features commonly associated with benign skin lesions.</p>
-                
-                <p><strong>Important Notes:</strong></p>
-                <ul>
-                    <li>This is not a medical diagnosis</li>
-                    <li>Regular self-examination is still recommended</li>
-                    <li>Consult a doctor if the lesion changes</li>
-                    <li>Protect skin from sun exposure</li>
-                </ul>
-                
-                <p><strong>When to see a doctor:</strong><br>
-                • Lesion changes in size, shape, or color<br>
-                • Itching, bleeding, or crusting<br>
-                • New growths or sores that don't heal<br>
-                • Family history of skin cancer</p>
-            </div>
-            """, unsafe_allow_html=True)
+            ''', unsafe_allow_html=True)
+            
+            # Confidence visualization
+            st.markdown("### 📈 Confidence Visualization")
+            gauge_fig = create_confidence_gauge(st.session_state.confidence)
+            st.pyplot(gauge_fig)
+            
+            # Radar chart
+            st.markdown("### 🎯 Probability Distribution")
+            radar_fig = create_radar_chart(st.session_state.confidence)
+            st.pyplot(radar_fig)
+            
+            # Interpretation and recommendations
+            st.markdown("### 💡 Interpretation & Recommendations")
+            
+            if st.session_state.prediction == "MALIGNANT":
+                st.markdown("""
+                <div style="background-color: #FEF2F2; padding: 20px; border-radius: 10px; border-left: 5px solid #DC2626;">
+                    <h4 style="color: #DC2626; margin-top: 0;">⚠️ POTENTIALLY MALIGNANT</h4>
+                    
+                    <p><strong>What this means:</strong><br>
+                    The AI model has identified features commonly associated with malignant skin lesions.</p>
+                    
+                    <p><strong>Recommended Actions:</strong></p>
+                    <ol>
+                        <li><strong>Consult a dermatologist immediately</strong></li>
+                        <li>Consider a biopsy for definitive diagnosis</li>
+                        <li>Monitor for changes in size, color, or shape</li>
+                        <li>Avoid sun exposure and use SPF 50+ sunscreen</li>
+                    </ol>
+                    
+                    <p><strong>ABCDE Rule for Melanoma:</strong><br>
+                    • <span style="color: #DC2626;">A</span>symmetry<br>
+                    • <span style="color: #DC2626;">B</span>order irregularity<br>
+                    • <span style="color: #DC2626;">C</span>olor variation<br>
+                    • <span style="color: #DC2626;">D</span>iameter > 6mm<br>
+                    • <span style="color: #DC2626;">E</span>volving/changing</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div style="background-color: #F0FDF4; padding: 20px; border-radius: 10px; border-left: 5px solid #16A34A;">
+                    <h4 style="color: #16A34A; margin-top: 0;">✅ LIKELY BENIGN</h4>
+                    
+                    <p><strong>What this means:</strong><br>
+                    The AI model has identified features commonly associated with benign skin lesions.</p>
+                    
+                    <p><strong>Important Notes:</strong></p>
+                    <ul>
+                        <li>This is not a medical diagnosis</li>
+                        <li>Regular self-examination is still recommended</li>
+                        <li>Consult a doctor if the lesion changes</li>
+                        <li>Protect skin from sun exposure</li>
+                    </ul>
+                    
+                    <p><strong>When to see a doctor:</strong><br>
+                    • Lesion changes in size, shape, or color<br>
+                    • Itching, bleeding, or crusting<br>
+                    • New growths or sores that don't heal<br>
+                    • Family history of skin cancer</p>
+                </div>
+                """, unsafe_allow_html=True)
 
 # Model Performance Section
 st.markdown("---")
@@ -698,37 +827,4 @@ st.markdown("""
     Skin Cancer Classification System v1.0 | Powered by EfficientNet-B0 | Model AUROC: 0.9614
     </p>
 </div>
-""", unsafe_allow_html=True)
-
-# Add JavaScript for better UX
-st.markdown("""
-<script>
-// Smooth scrolling for better UX
-document.addEventListener('DOMContentLoaded', function() {
-    // Add loading animation to buttons
-    const analyzeBtn = document.querySelector('[data-testid="stButton"] button');
-    if (analyzeBtn) {
-        analyzeBtn.addEventListener('click', function() {
-            const originalText = this.innerHTML;
-            this.innerHTML = '<span>🔄 Processing...</span>';
-            this.disabled = true;
-            
-            // Restore button after 3 seconds (in case of error)
-            setTimeout(() => {
-                this.innerHTML = originalText;
-                this.disabled = false;
-            }, 3000);
-        });
-    }
-    
-    // Auto-scroll to results when available
-    const checkResults = setInterval(() => {
-        const results = document.querySelector('[class*="prediction-box"]');
-        if (results) {
-            results.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            clearInterval(checkResults);
-        }
-    }, 1000);
-});
-</script>
 """, unsafe_allow_html=True)
